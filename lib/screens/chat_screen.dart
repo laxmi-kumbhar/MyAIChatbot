@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -13,6 +14,9 @@ class ChatScreen extends StatefulWidget {
 }
 
 class _ChatScreenState extends State<ChatScreen> {
+  static const String _currentMessagesKey = 'my_ai_chatbot_active_messages_v1';
+  static const String _savedSessionsKey = 'my_ai_chatbot_saved_sessions_v1';
+
   final TextEditingController _textController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   final GeminiService _geminiService = GeminiService();
@@ -26,6 +30,80 @@ class _ChatScreenState extends State<ChatScreen> {
   void initState() {
     super.initState();
     _loadApiKey();
+    _loadSavedChatHistory();
+  }
+
+  /// Loads both the active conversation and past chat sessions from local persistent storage
+  Future<void> _loadSavedChatHistory() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+
+      // 1. Load saved past sessions in sidebar history
+      final savedSessionsJson = prefs.getStringList(_savedSessionsKey);
+      if (savedSessionsJson != null && savedSessionsJson.isNotEmpty) {
+        final List<List<ChatMessage>> loaded = [];
+        for (final sessionStr in savedSessionsJson) {
+          try {
+            final List<dynamic> list = jsonDecode(sessionStr) as List<dynamic>;
+            final session = list
+                .map((m) => ChatMessage.fromMap(m as Map<String, dynamic>))
+                .toList();
+            if (session.isNotEmpty) {
+              loaded.add(session);
+            }
+          } catch (_) {}
+        }
+        if (mounted && loaded.isNotEmpty) {
+          setState(() {
+            _savedSessions.clear();
+            _savedSessions.addAll(loaded);
+          });
+        }
+      }
+
+      // 2. Load the active chat conversation
+      final activeMessagesJson = prefs.getString(_currentMessagesKey);
+      if (activeMessagesJson != null && activeMessagesJson.isNotEmpty) {
+        final List<dynamic> list = jsonDecode(activeMessagesJson) as List<dynamic>;
+        final current = list
+            .map((m) => ChatMessage.fromMap(m as Map<String, dynamic>))
+            .toList();
+        if (mounted && current.isNotEmpty) {
+          setState(() {
+            _messages.clear();
+            _messages.addAll(current);
+          });
+          // Restore conversation context to Gemini service
+          _geminiService.restoreSession(current);
+          _scrollToBottom(smooth: false);
+        }
+      }
+    } catch (e) {
+      debugPrint('Error loading saved chat history: $e');
+    }
+  }
+
+  /// Automatically persists active conversation and history to browser/device storage
+  Future<void> _persistHistoryToStorage() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+
+      // 1. Persist active conversation
+      if (_messages.isNotEmpty) {
+        final activeList = _messages.map((m) => m.toMap()).toList();
+        await prefs.setString(_currentMessagesKey, jsonEncode(activeList));
+      } else {
+        await prefs.remove(_currentMessagesKey);
+      }
+
+      // 2. Persist saved past sessions
+      final savedList = _savedSessions.map((session) {
+        return jsonEncode(session.map((m) => m.toMap()).toList());
+      }).toList();
+      await prefs.setStringList(_savedSessionsKey, savedList);
+    } catch (e) {
+      debugPrint('Error persisting chat history: $e');
+    }
   }
 
   Future<void> _loadApiKey() async {
@@ -163,6 +241,7 @@ class _ChatScreenState extends State<ChatScreen> {
           _isLoading = false;
         });
         _scrollToBottom();
+        _persistHistoryToStorage();
       }
     } catch (e) {
       if (mounted && !_isCancelled) {
@@ -179,6 +258,7 @@ class _ChatScreenState extends State<ChatScreen> {
           _isLoading = false;
         });
         _scrollToBottom();
+        _persistHistoryToStorage();
       }
     }
   }
@@ -189,6 +269,7 @@ class _ChatScreenState extends State<ChatScreen> {
         _savedSessions.insert(0, List<ChatMessage>.from(_messages));
         _messages.clear();
       });
+      _persistHistoryToStorage();
       _geminiService.startNewChat();
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -205,10 +286,17 @@ class _ChatScreenState extends State<ChatScreen> {
       if (_messages.isNotEmpty) {
         _savedSessions.insert(0, List<ChatMessage>.from(_messages));
       }
+      _savedSessions.removeWhere((s) =>
+          identical(s, session) ||
+          (s.length == session.length &&
+              s.isNotEmpty &&
+              session.isNotEmpty &&
+              s.first.text == session.first.text));
       _messages.clear();
       _messages.addAll(session);
       _geminiService.restoreSession(session);
     });
+    _persistHistoryToStorage();
     Navigator.of(context).pop(); // Close drawer
     _scrollToBottom();
   }
@@ -217,6 +305,7 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() {
       _savedSessions.clear();
     });
+    _persistHistoryToStorage();
     Navigator.of(context).pop();
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
@@ -813,6 +902,20 @@ class _ChatScreenState extends State<ChatScreen> {
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(fontSize: 14),
+                          ),
+                          trailing: IconButton(
+                            icon: Icon(
+                              Icons.close_rounded,
+                              size: 16,
+                              color: isDark ? Colors.white38 : Colors.black38,
+                            ),
+                            tooltip: 'Delete chat',
+                            onPressed: () {
+                              setState(() {
+                                _savedSessions.removeAt(index);
+                              });
+                              _persistHistoryToStorage();
+                            },
                           ),
                           onTap: () => _restoreSession(session),
                         );

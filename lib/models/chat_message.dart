@@ -28,4 +28,22 @@ class ChatMessage {
       isStreaming: isStreaming ?? this.isStreaming,
     );
   }
+
+  Map<String, dynamic> toMap() => {
+    'text': text,
+    'isUser': isUser,
+    'timestamp': timestamp.toIso8601String(),
+    'isError': isError,
+    'isStreaming': isStreaming,
+  };
+
+  factory ChatMessage.fromMap(Map<String, dynamic> map) => ChatMessage(
+    text: map['text'] as String? ?? '',
+    isUser: map['isUser'] as bool? ?? false,
+    timestamp: map['timestamp'] != null
+        ? DateTime.tryParse(map['timestamp'] as String) ?? DateTime.now()
+        : DateTime.now(),
+    isError: map['isError'] as bool? ?? false,
+    isStreaming: map['isStreaming'] as bool? ?? false,
+  );
 }
