@@ -14,15 +14,16 @@ class ChatScreen extends StatefulWidget {
 }
 
 class _ChatScreenState extends State<ChatScreen> {
-  static const String _currentMessagesKey = 'my_ai_chatbot_active_messages_v1';
-  static const String _savedSessionsKey = 'my_ai_chatbot_saved_sessions_v1';
+  static const String _sessionsStorageKey = 'my_ai_chatbot_sessions_v3';
+  static const String _activeSessionIdKey = 'my_ai_chatbot_active_session_id_v3';
 
   final TextEditingController _textController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   final GeminiService _geminiService = GeminiService();
 
   final List<ChatMessage> _messages = [];
-  final List<List<ChatMessage>> _savedSessions = [];
+  final List<ChatHistorySession> _sessions = [];
+  String? _currentSessionId;
   bool _isLoading = false;
   bool _isCancelled = false;
 
@@ -33,76 +34,63 @@ class _ChatScreenState extends State<ChatScreen> {
     _loadSavedChatHistory();
   }
 
-  /// Loads both the active conversation and past chat sessions from local persistent storage
+  /// Loads conversation history and restores active session from persistent storage
   Future<void> _loadSavedChatHistory() async {
     try {
       final prefs = await SharedPreferences.getInstance();
 
-      // 1. Load saved past sessions in sidebar history
-      final savedSessionsJson = prefs.getStringList(_savedSessionsKey);
-      if (savedSessionsJson != null && savedSessionsJson.isNotEmpty) {
-        final List<List<ChatMessage>> loaded = [];
-        for (final sessionStr in savedSessionsJson) {
+      final sessionsJson = prefs.getStringList(_sessionsStorageKey);
+      if (sessionsJson != null && sessionsJson.isNotEmpty) {
+        final List<ChatHistorySession> loaded = [];
+        for (final str in sessionsJson) {
           try {
-            final List<dynamic> list = jsonDecode(sessionStr) as List<dynamic>;
-            final session = list
-                .map((m) => ChatMessage.fromMap(m as Map<String, dynamic>))
-                .toList();
-            if (session.isNotEmpty) {
-              loaded.add(session);
-            }
+            final map = jsonDecode(str) as Map<String, dynamic>;
+            loaded.add(ChatHistorySession.fromMap(map));
           } catch (_) {}
         }
-        if (mounted && loaded.isNotEmpty) {
-          setState(() {
-            _savedSessions.clear();
-            _savedSessions.addAll(loaded);
-          });
+        if (loaded.isNotEmpty) {
+          _sessions.clear();
+          _sessions.addAll(loaded);
         }
       }
 
-      // 2. Load the active chat conversation
-      final activeMessagesJson = prefs.getString(_currentMessagesKey);
-      if (activeMessagesJson != null && activeMessagesJson.isNotEmpty) {
-        final List<dynamic> list = jsonDecode(activeMessagesJson) as List<dynamic>;
-        final current = list
-            .map((m) => ChatMessage.fromMap(m as Map<String, dynamic>))
-            .toList();
-        if (mounted && current.isNotEmpty) {
-          setState(() {
-            _messages.clear();
-            _messages.addAll(current);
-          });
-          // Restore conversation context to Gemini service
-          _geminiService.restoreSession(current);
-          _scrollToBottom(smooth: false);
-        }
+      final activeId = prefs.getString(_activeSessionIdKey);
+      ChatHistorySession? activeSession;
+      if (activeId != null && _sessions.any((s) => s.id == activeId)) {
+        activeSession = _sessions.firstWhere((s) => s.id == activeId);
+      } else if (_sessions.isNotEmpty) {
+        activeSession = _sessions.first;
+      }
+
+      if (mounted && activeSession != null && activeSession.messages.isNotEmpty) {
+        setState(() {
+          _currentSessionId = activeSession!.id;
+          _messages.clear();
+          _messages.addAll(activeSession.messages);
+        });
+        _geminiService.restoreSession(_messages);
+        _scrollToBottom(smooth: false);
+      } else if (mounted && _sessions.isNotEmpty) {
+        setState(() {});
       }
     } catch (e) {
       debugPrint('Error loading saved chat history: $e');
     }
   }
 
-  /// Automatically persists active conversation and history to browser/device storage
-  Future<void> _persistHistoryToStorage() async {
+  /// Automatically persists all conversations and active session to local storage
+  Future<void> _persistSessions() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-
-      // 1. Persist active conversation
-      if (_messages.isNotEmpty) {
-        final activeList = _messages.map((m) => m.toMap()).toList();
-        await prefs.setString(_currentMessagesKey, jsonEncode(activeList));
+      final list = _sessions.map((s) => jsonEncode(s.toMap())).toList();
+      await prefs.setStringList(_sessionsStorageKey, list);
+      if (_currentSessionId != null) {
+        await prefs.setString(_activeSessionIdKey, _currentSessionId!);
       } else {
-        await prefs.remove(_currentMessagesKey);
+        await prefs.remove(_activeSessionIdKey);
       }
-
-      // 2. Persist saved past sessions
-      final savedList = _savedSessions.map((session) {
-        return jsonEncode(session.map((m) => m.toMap()).toList());
-      }).toList();
-      await prefs.setStringList(_savedSessionsKey, savedList);
     } catch (e) {
-      debugPrint('Error persisting chat history: $e');
+      debugPrint('Error saving sessions: $e');
     }
   }
 
@@ -181,6 +169,7 @@ class _ChatScreenState extends State<ChatScreen> {
           _messages[_messages.length - 1] = _messages.last.copyWith(isStreaming: false);
         }
       });
+      _persistSessions();
     }
   }
 
@@ -195,6 +184,27 @@ class _ChatScreenState extends State<ChatScreen> {
       return;
     }
 
+    // Determine or create the active session
+    ChatHistorySession currentSession;
+    final existingIndex = _sessions.indexWhere((s) => s.id == _currentSessionId);
+    if (existingIndex != -1) {
+      currentSession = _sessions[existingIndex];
+      if (currentSession.title == 'New Chat' || currentSession.messages.isEmpty) {
+        currentSession.title = text.length > 35 ? '${text.substring(0, 35)}...' : text;
+      }
+      currentSession.updatedAt = DateTime.now();
+    } else {
+      final title = text.length > 35 ? '${text.substring(0, 35)}...' : text;
+      final newId = DateTime.now().millisecondsSinceEpoch.toString();
+      currentSession = ChatHistorySession(
+        id: newId,
+        title: title,
+        messages: [],
+      );
+      _sessions.insert(0, currentSession);
+      _currentSessionId = newId;
+    }
+
     _textController.clear();
     _isCancelled = false;
 
@@ -202,9 +212,12 @@ class _ChatScreenState extends State<ChatScreen> {
       _messages.add(ChatMessage(text: text, isUser: true));
       // Immediately display AI bubble with typing dots (ChatGPT & Gemini style)
       _messages.add(ChatMessage(text: '', isUser: false, isStreaming: true));
+      currentSession.messages.clear();
+      currentSession.messages.addAll(_messages);
       _isLoading = true;
     });
     _scrollToBottom();
+    _persistSessions();
 
     String accumulated = '';
 
@@ -238,10 +251,12 @@ class _ChatScreenState extends State<ChatScreen> {
               isStreaming: false,
             );
           }
+          currentSession.messages.clear();
+          currentSession.messages.addAll(_messages);
           _isLoading = false;
         });
         _scrollToBottom();
-        _persistHistoryToStorage();
+        _persistSessions();
       }
     } catch (e) {
       if (mounted && !_isCancelled) {
@@ -255,57 +270,73 @@ class _ChatScreenState extends State<ChatScreen> {
             isError: true,
             isStreaming: false,
           );
+          currentSession.messages.clear();
+          currentSession.messages.addAll(_messages);
           _isLoading = false;
         });
         _scrollToBottom();
-        _persistHistoryToStorage();
+        _persistSessions();
       }
     }
   }
 
   void _startNewChat() {
-    if (_messages.isNotEmpty) {
-      setState(() {
-        _savedSessions.insert(0, List<ChatMessage>.from(_messages));
-        _messages.clear();
-      });
-      _persistHistoryToStorage();
-      _geminiService.startNewChat();
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Started a new conversation'),
-          duration: Duration(seconds: 1),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
-    }
+    setState(() {
+      _currentSessionId = null;
+      _messages.clear();
+    });
+    _persistSessions();
+    _geminiService.startNewChat();
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Started a new conversation'),
+        duration: Duration(seconds: 1),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
   }
 
-  void _restoreSession(List<ChatMessage> session) {
+  void _selectSession(ChatHistorySession session) {
     setState(() {
-      if (_messages.isNotEmpty) {
-        _savedSessions.insert(0, List<ChatMessage>.from(_messages));
-      }
-      _savedSessions.removeWhere((s) =>
-          identical(s, session) ||
-          (s.length == session.length &&
-              s.isNotEmpty &&
-              session.isNotEmpty &&
-              s.first.text == session.first.text));
+      _currentSessionId = session.id;
       _messages.clear();
-      _messages.addAll(session);
-      _geminiService.restoreSession(session);
+      _messages.addAll(session.messages);
+      _geminiService.restoreSession(_messages);
     });
-    _persistHistoryToStorage();
+    _persistSessions();
     Navigator.of(context).pop(); // Close drawer
     _scrollToBottom();
   }
 
+  void _deleteSession(int index) {
+    final deleted = _sessions[index];
+    setState(() {
+      _sessions.removeAt(index);
+      if (_currentSessionId == deleted.id) {
+        if (_sessions.isNotEmpty) {
+          final next = _sessions.first;
+          _currentSessionId = next.id;
+          _messages.clear();
+          _messages.addAll(next.messages);
+          _geminiService.restoreSession(_messages);
+        } else {
+          _currentSessionId = null;
+          _messages.clear();
+          _geminiService.startNewChat();
+        }
+      }
+    });
+    _persistSessions();
+  }
+
   void _clearAllHistory() {
     setState(() {
-      _savedSessions.clear();
+      _sessions.clear();
+      _currentSessionId = null;
+      _messages.clear();
     });
-    _persistHistoryToStorage();
+    _persistSessions();
+    _geminiService.startNewChat();
     Navigator.of(context).pop();
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
@@ -864,11 +895,11 @@ class _ChatScreenState extends State<ChatScreen> {
                       color: Colors.grey,
                     ),
                   ),
-                  if (_savedSessions.isNotEmpty)
+                  if (_sessions.isNotEmpty)
                     InkWell(
                       onTap: _clearAllHistory,
                       child: const Text(
-                        'Clear',
+                        'Clear all',
                         style: TextStyle(fontSize: 11, color: Colors.redAccent),
                       ),
                     ),
@@ -876,7 +907,7 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
             ),
             Expanded(
-              child: _savedSessions.isEmpty
+              child: _sessions.isEmpty
                   ? Center(
                       child: Text(
                         'No previous chats yet.',
@@ -887,37 +918,57 @@ class _ChatScreenState extends State<ChatScreen> {
                       ),
                     )
                   : ListView.builder(
-                      itemCount: _savedSessions.length,
+                      itemCount: _sessions.length,
                       itemBuilder: (context, index) {
-                        final session = _savedSessions[index];
-                        final previewText = session.firstWhere(
-                          (m) => m.isUser,
-                          orElse: () => session.first,
-                        ).text;
+                        final session = _sessions[index];
+                        final isSelected = session.id == _currentSessionId;
 
-                        return ListTile(
-                          leading: const Icon(Icons.chat_bubble_outline, size: 18),
-                          title: Text(
-                            previewText,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(fontSize: 14),
+                        return Container(
+                          margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: isSelected
+                                ? (isDark
+                                    ? const Color(0xFF2563EB).withValues(alpha: 0.2)
+                                    : const Color(0xFF2563EB).withValues(alpha: 0.1))
+                                : Colors.transparent,
+                            borderRadius: BorderRadius.circular(10),
+                            border: isSelected
+                                ? Border.all(color: const Color(0xFF2563EB).withValues(alpha: 0.4))
+                                : null,
                           ),
-                          trailing: IconButton(
-                            icon: Icon(
-                              Icons.close_rounded,
-                              size: 16,
-                              color: isDark ? Colors.white38 : Colors.black38,
+                          child: ListTile(
+                            dense: true,
+                            contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 0),
+                            leading: Icon(
+                              Icons.chat_bubble_outline_rounded,
+                              size: 17,
+                              color: isSelected
+                                  ? const Color(0xFF3B82F6)
+                                  : (isDark ? Colors.white54 : Colors.black54),
                             ),
-                            tooltip: 'Delete chat',
-                            onPressed: () {
-                              setState(() {
-                                _savedSessions.removeAt(index);
-                              });
-                              _persistHistoryToStorage();
-                            },
+                            title: Text(
+                              session.title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 13.5,
+                                fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal,
+                                color: isSelected
+                                    ? (isDark ? Colors.white : const Color(0xFF1D4ED8))
+                                    : (isDark ? Colors.white70 : Colors.black87),
+                              ),
+                            ),
+                            trailing: IconButton(
+                              icon: Icon(
+                                Icons.close_rounded,
+                                size: 15,
+                                color: isDark ? Colors.white30 : Colors.black38,
+                              ),
+                              tooltip: 'Delete chat',
+                              onPressed: () => _deleteSession(index),
+                            ),
+                            onTap: () => _selectSession(session),
                           ),
-                          onTap: () => _restoreSession(session),
                         );
                       },
                     ),

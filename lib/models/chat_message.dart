@@ -47,3 +47,36 @@ class ChatMessage {
     isStreaming: map['isStreaming'] as bool? ?? false,
   );
 }
+
+class ChatHistorySession {
+  final String id;
+  String title;
+  final List<ChatMessage> messages;
+  DateTime updatedAt;
+
+  ChatHistorySession({
+    required this.id,
+    required this.title,
+    required this.messages,
+    DateTime? updatedAt,
+  }) : updatedAt = updatedAt ?? DateTime.now();
+
+  Map<String, dynamic> toMap() => {
+    'id': id,
+    'title': title,
+    'messages': messages.map((m) => m.toMap()).toList(),
+    'updatedAt': updatedAt.toIso8601String(),
+  };
+
+  factory ChatHistorySession.fromMap(Map<String, dynamic> map) => ChatHistorySession(
+    id: map['id'] as String? ?? DateTime.now().millisecondsSinceEpoch.toString(),
+    title: map['title'] as String? ?? 'Conversation',
+    messages: (map['messages'] as List<dynamic>?)
+            ?.map((m) => ChatMessage.fromMap(m as Map<String, dynamic>))
+            .toList() ??
+        [],
+    updatedAt: map['updatedAt'] != null
+        ? DateTime.tryParse(map['updatedAt'] as String) ?? DateTime.now()
+        : DateTime.now(),
+  );
+}
